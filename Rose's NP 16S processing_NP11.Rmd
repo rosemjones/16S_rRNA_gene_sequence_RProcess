@@ -1,0 +1,675 @@
+---
+title: "Rose's DNA processing"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+#Step 1. DADA2.
+#Step 2. Import to phyloseq and add metadata table
+#Step 3. Removal of contamination and further quality check
+#Step 4. Plotting relative abundance bar plots for relative abundance
+#Step 5. Making files for BLAST analysis etc.
+#Step 6. Bubbleplots
+
+#Data: 1) Bacterial 16S rRNA gene sequence data, raw 
+#      2) Metadata table, with site names = rownames and column names = site variables. Site names should match between sequence and metadata. This will be changed in the script
+
+#This is the Windows 10 version, with latest R and RStudio
+
+#Step 1: DADA2.
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("dada2", version = "3.9")
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dada2)
+library(ShortRead)
+```
+
+```{r}
+path <- "C:\\Users\\rosej\\Documents\\Work\\DADA2\\NP13-4\\NP11"
+list.files(path)
+```
+
+```{r}
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+sample.names
+```
+
+```{r}
+plotQualityProfile(fnFs[1:2])
+```
+
+```{r}
+plotQualityProfile(fnRs[1:2])
+```
+
+```{r}
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+```
+
+```{r}
+fnFs
+```
+
+```{r}
+fnRs
+```
+
+```{r}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(275,200),
+              maxN=0, maxEE=c(2,2), truncQ=2, trimLeft = 40, rm.phix=TRUE,
+              compress=TRUE, multithread=FALSE) # On Windows set multithread=FALSE
+out
+```
+
+```{r}
+errF <- learnErrors(filtFs, multithread=TRUE)
+```
+
+```{r}
+errR <- learnErrors(filtRs, multithread=TRUE)
+```
+
+```{r}
+plotErrors(errF, nominalQ=TRUE)
+```
+
+```{r}
+derepFs <- derepFastq(filtFs, verbose=TRUE)
+derepRs <- derepFastq(filtRs, verbose=TRUE)
+# Name the derep-class objects by the sample names
+names(derepFs) <- sample.names
+names(derepRs) <- sample.names
+```
+
+```{r}
+dadaFs <- dada(derepFs, err=errF, multithread=TRUE)
+```
+
+```{r}
+dadaRs <- dada(derepRs, err=errR, multithread=TRUE)
+```
+
+```{r}
+dadaFs[[1]]
+```
+
+```{r}
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose=TRUE)
+# Inspect the merger data.frame from the first sample
+head(mergers[[1]])
+```
+
+```{r}
+seqtab <- makeSequenceTable(mergers)
+```
+
+```{r}
+dim(seqtab)
+```
+
+```{r}
+table(nchar(getSequences(seqtab)))
+```
+
+```{r}
+seqtab2 <- seqtab[,nchar(colnames(seqtab)) %in% seq(328,334)]
+```
+
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab2, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+```
+
+```{r}
+sum(seqtab.nochim)/sum(seqtab2)
+```
+
+```{r}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+track
+```
+
+```{r}
+taxa <- assignTaxonomy(seqtab.nochim, "C:\\Users\\rosej\\Documents\\Work\\DADA2\\silva_nr_v132_train_set.fa", multithread=TRUE)
+```
+
+```{r}
+taxa <- addSpecies(taxa, "C:\\Users\\rosej\\Documents\\Work\\DADA2\\silva_species_assignment_v132.fa")
+```
+
+#Step 2. Import to phyloseq and add metadata table
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install('phyloseq')
+install.packages("tidyverse")
+```
+
+```{r}
+library(phyloseq)
+library(tidyverse)
+```
+
+```{r}
+NP11DNA <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE),
+               tax_table(taxa))
+```
+
+```{r}
+library(devtools)
+devtools::install_github("benjjneb/decontam")
+```
+
+```{r}
+library(phyloseq); packageVersion("phyloseq")
+library(ggplot2); packageVersion("ggplot2")
+library(decontam); packageVersion("decontam")
+```
+
+```{r}
+DF
+```
+
+
+#Add metadata table to phyloseq object
+```{r}
+NP11DNA = NP11DNA
+# Define a data frame from your csv table
+DF = read.csv("C:\\Users\\rosej\\Documents\\Work\\DADA2\\NP13-4\\NP11\\MapFileNP11.csv", header=TRUE, sep=",", row.names=1)
+# Check that the rownames match the sample names. They need to for this to work. The next section helps you see where a mismatch is
+all(rownames(DF) %in% sample_names(NP11DNA))
+sample_names(NP11DNA)
+rownames(DF)
+```
+
+```{r}
+# Convert to "sample_data" class
+sampledata = sample_data(DF)
+# Now merge.
+NP11 = merge_phyloseq(sampledata, NP11DNA)
+NP11
+```
+
+```{r}
+head(sample_data(NP11))
+```
+
+#Step 3. Removal of contamination and further quality check
+
+#making sure the unknowns are included in the analysis and accounted for, and removing chloroplast and mitochondrial DNA
+```{r}
+tax <- data.frame(tax_table(NP11))
+
+tax.clean <- data.frame(row.names = row.names(tax),
+Kingdom = str_replace(tax[,1], "D_0__",""),
+Phylum = str_replace(tax[,2], "D_1__",""),
+Class = str_replace(tax[,3], "D_2__",""),
+Order = str_replace(tax[,4], "D_3__",""),
+Family = str_replace(tax[,5], "D_4__",""),
+Genus = str_replace(tax[,6], "D_5__",""),
+Species = str_replace(tax[,7], "D_6__",""),
+stringsAsFactors = FALSE)
+tax.clean[is.na(tax.clean)] <- ""
+
+for (i in 1:7){ tax.clean[,i] <- as.character(tax.clean[,i])}
+####### Fille holes in the tax table
+tax.clean[is.na(tax.clean)] <- ""
+for (i in 1:nrow(tax.clean)){
+
+# Fill in missing taxonomy
+if (tax.clean[i,2] == ""){
+kingdom <- paste("Kingdom_", tax.clean[i,1], sep = "")
+tax.clean[i, 2:7] <- kingdom
+} else if (tax.clean[i,3] == ""){
+phylum <- paste("Phylum_", tax.clean[i,2], sep = "")
+tax.clean[i, 3:7] <- phylum
+} else if (tax.clean[i,4] == ""){
+class <- paste("Class_", tax.clean[i,3], sep = "")
+tax.clean[i, 4:7] <- class
+} else if (tax.clean[i,5] == ""){
+order <- paste("Order_", tax.clean[i,4], sep = "")
+tax.clean[i, 5:7] <- order
+} else if (tax.clean[i,6] == ""){
+family <- paste("Family_", tax.clean[i,5], sep = "")
+tax.clean[i, 6:7] <- family
+} else if (tax.clean[i,7] == ""){
+tax.clean$Species[i] <- paste("Genus",tax.clean$Genus[i], sep = "_")
+}
+}
+
+tax_table(NP11) <- as.matrix(tax.clean)
+```
+
+```{r}
+NP11DNA <- subset_taxa(NP11, (Order!="Chloroplast") | is.na(Order))
+NP11DNA <- subset_taxa(NP11, (Family!="Mitochondria") | is.na(Family))
+NP11DNA
+```
+
+#Library size plot for visual inspection
+```{r}
+df <- as.data.frame(sample_data(NP11)) # Put sample_data into a ggplot-friendly data.frame
+df$LibrarySize <- sample_sums(NP11)
+df <- df[order(df$LibrarySize),]
+df$Index <- seq(nrow(df))
+ggplot(data=df, aes(x=Index, y=LibrarySize, color=Treatment)) + geom_point()
+```
+
+#What overlap is there between no-template control (methodcontrol) and the others? These can be removed from the dataset at this point, depending on nature of control and analysis
+```{r}
+sample_data(NP11)$is.neg <- sample_data(NP11)$Treatment == "Methodcontrol"
+contamdf.prev <- isContaminant(NP11, method="prevalence", neg="is.neg")
+table(contamdf.prev$contaminant)
+```
+#As these samples are very low biomass in nature, rare/common was not used as a metric of quality as contamination may mask data.
+
+#Step 4. Plotting relative abundance bar plots for relative abundance
+```{r}
+NP11 <-transform_sample_counts(NP11DNA, function(x) x/sum(x))
+```
+
+#Use iwanthue.com to generate hexcodes, then labell them as you wish
+```{r}
+NPGENUS <- c('Acidovorax' = "#93e978",
+'Actinomyces' = "#370175",
+'Aestuariispira' = "#b6e35d",
+'Alicyclobacillus' = "#252793",
+'Acinetobacter' = "#90d95b",
+'Afipia' ="#5d1286",
+'Alloprevotella' = "#55e381",
+'Allorhizobium-Neorhizobium-Pararhizobium-Rhizobium' = "#7f007b",
+'Amylibacter' = "#75ca51",
+'Aquibacter' = "#32096a",
+'Arcobacter' = "#c5cc3c",
+'Arenicella' = "#012f94",
+'Asticcaulis' = "#dec839",
+'Aurantimonas' = "#2756c9",
+'Bacillus' = "#e0d850",
+'BD1-7_clade'= "#6243b6",
+'Bdellovibrio' = "#77bd3e",
+'Belnapia' = "#853bad",
+'Blastopirellula' = "#5cc556",
+'Blastococcus' = "#8f2698",
+'Bradyrhizobium' = "#2cbf5f",
+'Brevibacillus' = "#a72f9e",
+'Bryobacter' = "#24992e",
+'Burkholderia-Caballeronia-Paraburkholderia' = "#d164d4",
+'Bythopirellula' = "#4fa127",
+'C1-B045' = "#886ce5",
+'Candidatus_Finniella' = "#72aa23",
+'Chelatococcus' = "#ae6de4",
+'Clade_Ib' = "#7b9e00",
+'Capnocytophaga' = "#0071e2",
+'Caulobacter' = "#caa30f",
+'Chryseobacterium' = "#003e9e",
+'Cnuella' = "#f4d255",
+'Colwellia' = "#012277",
+'Corynebacterium' = "#b1e46f",
+'Corynebacterium_1'= "#4c0063",
+'Coxiella' = "#48efa8",
+'Cosenzaea' = "#ba2690",
+'Crocinitomix' = "#02f0b7",
+'Curvibacter' = "#be006b",
+'Curtobacterium' = "#00b25c",
+'Cutibacterium' = "#c63ea6",
+'Cycloclasticus' = "#019838",
+'DSSF69' = "#ef6cd5",
+'Dietzia' = "#107400",
+'Diplosphaera' = "#b75fd2",
+'Dyella' = "#01bb6b",
+'Enterococcus' = "#f25fc0",
+'Erythrobacter' = "#008931",
+'Escherichia/Shigella' = "#e28eff",
+'Euryhalocaulis' = "#005d07",
+'Fabibacter' = "#c58cff",
+'Finegoldia' = "#8ce98a",
+'Flavicella' = "#281466",
+'Flavirhabdus' = "#7ceb99",
+'Fluviicola' = "#8c006e",
+'Fulvimonas' = "#01c888",
+'Fusobacterium' = "#b7006d",
+'Galbitalea' = "#38eec4",
+'Gemella' = "#d31f6e",
+'Gemmatimonas' = "#009b50",
+'Geopsychrobacter' = "#ed4ba1",
+'Gemmobacter' = "#008033",
+'Granulicatella' = "#e84090",
+'Haemophilus' = "#01ad73",
+'Halobacteriovorax' = "#a3006f",
+'Janibacter' = "#b0e37f",
+'Ichthyenterobacterium' = "#58005a",
+'Klebsiella' = "#9ce698",
+'Kordiimonas' = "#77005f",
+'Limnobacter' = "#7ae9b2",
+'Lactobacillus' = "#be0054",
+'Lactococcus' = "#01e5d0",
+'Lautropia' = "#db2c59",
+'Leptotrichia' = "#02d0b3",
+'Listeria' = "#f24378",
+'LS-NOB' = "#00b78e",
+'Lutibacter' = "#ff5698",
+'Magnetospira' = "#008342",
+'Magnetovibrio' = "#ff8be8",
+'Maribacter' = "#00530d",
+'Maricaulis' = "#f99dff",
+'Marine_Methylotrophic_Group_3' = "#6c8400",
+'Marinicella' = "#498fff",
+'Marinosulfonomonas'= "#edb130",
+'Mariprofundus' = "#0168c5",
+'Maritimimonas' = "#ef9b2d",
+'Massilia' = "#00469a",
+'Mesorhizobium' = "#e7d662",
+'Methylobacterium' = "#231d5a",
+'Methylophaga' = "#ffb94c",
+'Methylotenera' = "#6c95ff",
+'Mf105b01'= "#ad9400",
+'Moritella' = "#59a0ff",
+'Microvirga' = "#bb8f00",
+'Nannocystis' = "#9a9bff",
+'Neisseria' = "#8c8d00",
+'Nocardioides' = "#6aa6ff",
+'Novosphingobium' = "#bf5106",
+'Nitrospira' = "#0295e3",
+'NS4_marine_group' = "#ef8330",
+'Oleiphilus' = "#0067b4",
+'Oleispira' = "#ffc45b",
+'OM27_clade' = "#002d6d",
+'OM43_clade' = "#f4d16b",
+'Paenibacillus' = "#003d83",
+'Paracoccus' = "#cadd77",
+'Pajaroellobacter' = "#4a0048",
+'Pantoea' = "#a5e492",
+'Paraglaciecola' = "#450947",
+'Parvibaculum' = "#73e9ba",
+'Parvimonas' = "#b00054",
+'Paucibacter' = "#4beae4",
+'Pedobacter' = "#9a1300",
+'Peredibacter' = "#57b8ff",
+'Peptostreptococcus' = "#b73910",
+'Pelagicoccus' = "#00afe1",
+'Pir4_lineage' = "#ae1819",
+'Phreatobacter' = "#008dcc",
+'Pirellula' = "#f67a3b",
+'Planctomicrobium' = "#015398",
+'Porphyromonas' = "#ffaa51",
+'Portibacter' = "#016eaf",
+'Porticoccus' = "#bc6000",
+'Prevotella' = "#baa9ff",
+'Prevotella_2' = "#798200",
+'Profundimonas' = "#d4a5ff",
+'Pseudahrensia' = "#597400",
+'Pseudenhygromyxa' = "#ff9fef",
+'Pseudoalteromonas' = "#004502",
+'Pseudofulvibacter' = "#ff73b7",
+'Pseudohongiella' = "#006a27",
+'Pseudomonas' = "#ff577b",
+'Pseudorhizobium' ="#00916a",
+'Psychrobium' = "#cb243d",
+'Psychroglaciecola' = "#9fe4a8",
+'Ralstonia' = "#6e004d",
+'Reyranella' = "#c1de8a",
+'Rhizobacter' = "#85004c",
+'Rhodoblastus' = "#e1d777",
+'Robiginitomaculum' = "#545da0",
+'Roseobacter_clade_NAC11-7_lineage' = "#a28900",
+'Rubinisphaera' = "#d5acff",
+'Salinirepens' = "#325b00",
+'Schlesneria' = "#ffa1e5",
+'Sedimentitalea' = "#005f2b",
+'Selenomonas' = "#ef4959",
+'Selenomonas_3' = "#525f00",
+'SM1A02' = "#ff95d3",
+'Sneathiella' = "#7f7a00",
+'Sphingomonas' = "#9480c6",
+'Sphingorhabdus' = "#707100",
+'Staphylococcus' = "#885c9b",
+'Starkya' = "#ffca6c",
+'Stenotrophomonas' = "#6f2758",
+'Streptococcus' = "#ffbf6d",
+'Subdoligranulum' = "#7d003a",
+'Sulfurimonas' = "#e2c97f",
+'SWB02' = "#6a002b",
+'Tepidomonas' = "#909b51",
+'Terasakiella' = "#af0040",
+'Thiohalophilus' = "#596922",
+'Tumebacillus' = "#ff7297",
+'Tychonema_CCAP_1459_11B' = "#4a5500",
+'Veillonella' = "#ff7491",
+'wb1-P19' = "#4e5000",
+'Yokenella' = "#f45159",
+'NA' = "#716100",
+'Diplosphaera' = "#cb739c",
+'Kordimonas' = "#8b7000",
+'Asticcacaulis' = "#7e2d58",
+'Haliangium' = "#ffbf76",
+'Halioglobus' = "#68001c",
+'Sulfuritalea' = "#ffb265",
+"Aliikangiella" = "#84002d",
+"Alererythrobacter" = "#bca75e",
+"Anaerospora" = "#b20037",
+"Aquabacterium" = "#8b7d36",
+"Aurantivirga" = "#a30026",
+"Balneola" = "#ffb77c",
+"Blastomonas" = "#560c00",
+"Candidatus_Captivus" = "#ffb17f",
+"Cellulosimicrobium" = "#6a0013",
+"Cloacibacterium" = "#ff9350",
+"Comamonas" = "#73000f",
+"Cupriavidus" = "#bc9353",
+"Dermacoccus" = "#99002a",
+"Dongia" = "#9a7000",
+"Dubosiella" = "#ff87a2",
+"Enterobacter" = "#775000",
+"Kosakonia" = "#dc7b91",
+"Lelliottia" = "#ab6c00",
+"Lutimonas" = "#a3485f",
+"Microbacterium" = "#915b00",
+"MND1" = "#eb8892",
+"Mycobacterium" = "#6d4700",
+"NS2b_marine_group" = "#ff7b7f",
+"Prevotella_9" = "#612400",
+"Shewanella" = "#ffa686",
+"Starkeya" = "#6a1200",
+"Tepidimonas" = "#ff9190",
+"Thioclava" = "#7d4800",
+"Tychonema_CCAP_1459-11B" = "#ff726d",
+"Tyzzerella_4" = "#92662d",
+"Vibrionimonas" = "#ca2d34",
+"Weissella" = "#ff916c",
+"Streptomyces" = "#880000",
+"Anaerostipes" = "#ff7e4c",
+"Arenimonas" = "#8a343a",
+"Bacteroides" = "#ff6a51",
+"Brevundimonas" = "#841d00",
+"Christensenellaceae_R-7_group" = "#ff7465",
+"Chryseolina" = "#8c0012",
+"Desulfocapsa" = "#ff7c5d",
+"Dyadobacter" = "#8e0019",
+"Flavisolibacter" = "#c4676b",
+"Flavitalea" = "#aa4600",
+"Gemmata" = "#ac5e47",
+"Hephaestia" = "#d9542d",
+"Herbaspirillum" = "#8b455c",
+"Hymenobacter" = "#41c65d",
+"Lutimonas" = "#a037b4",
+"Marinifilum" = "#72be3e",
+"Moraxella" = "#7748bd",
+"Neorhizobium" = "#aec334",
+"Noviherbaspirillum" = "#3b56cb",
+"Pelomonas" = "#d4b835",
+"Phenylobacterium" = "#5f77f3",
+"Planktomarina" = "#e6a01e",
+"Povalibacter" = "#2f65d0",
+"Prevotella_9" = "#eb8727",
+"Pseudolabrys" = "#9668e4",
+"Roseomonas" = "#42972e",
+"Rugamonas" = "#c468e0",
+"Ruminococcaceae" = "#799622",
+"Synechococcus_CC9902" = "#d245ac",
+"Thioprofundum" = "#50b470",
+"UTCFX1" = "#d52e7e",
+"Xylophilus" = "#4ed09e",
+"Anaerococcus" = "#e42749",
+"Candidatus_Xiphinematobacter" = "#59c4b6",
+"Chryseolina" = "#e24433",
+"Gordonia" = "#4cbee0",
+"Odoribacter" = "#b53816",
+"Prevotella_7" = "#6188ea",
+"Pseudarthrobacter" = "#c87c19",
+"Rhodopila" = "#5556b3",
+"Ruminococcaceae_UCG-002" = "#b1aa3d",
+'Diplosphaera' = "#cb739c",
+'Kordimonas' = "#8b7000",
+'Asticcacaulis' = "#7e2d58",
+'Haliangium' = "#ffbf76",
+'Halioglobus' = "#68001c",
+'Sulfuritalea' = "#ffb265")
+```
+
+```{r}
+meltd <- psmelt(NP11)
+meltd
+```
+
+
+```{r}
+#meltd <- subset(meltd, Abundance >= 0.05, select=OTU:Species)
+#meltd
+```
+
+```{r}
+pl = ggplot(meltd, aes_string(x = "Sample", y = "Abundance",  # Label Axis
+                            fill = "Genus"))
+
+pl = pl + geom_bar(stat = "identity", 
+                  position = "stack",
+                  color = "black") 
+
+pl = pl + scale_fill_manual(values=NPGENUS)
+
+pl = pl + theme(axis.text.x = element_text(angle = -90, hjust = 0))
+
+pl = pl + guides(fill = guide_legend(override.aes = list(colour = NULL), reverse=FALSE)) + 
+    theme(legend.key = element_rect(colour = "black"))
+
+ggsave('NP11DNAGenus.pdf', width=40, height=10)
+ggsave('NP11DNAGenus.jpeg', width=40, height=10)
+
+pl
+
+```
+
+#Step 5. Making files for BLAST analysis etc.
+```{r}
+# giving our seq headers more manageable names (ASV_1, ASV_2...)
+asv_seqs <- colnames(seqtab.nochim)
+asv_headers <- vector(dim(seqtab.nochim)[2], mode="character")
+
+for (i in 1:dim(seqtab.nochim)[2]) {
+  asv_headers[i] <- paste(">ASV", i, sep="_")
+}
+
+  # making and writing out a fasta of our final ASV seqs:
+asv_fasta <- c(rbind(asv_headers, asv_seqs))
+write(asv_fasta, "NP11DNAGenusASVs.fa")
+
+  # count table:
+asv_tab <- t(seqtab.nochim)
+row.names(asv_tab) <- sub(">", "", asv_headers)
+write.table(asv_tab, "NP11DNAGenus_counts.txt", sep="\t", quote=F)
+
+  # tax table:
+asv_tax <- taxa
+row.names(asv_tax) <- sub(">", "", asv_headers)
+write.table(asv_tax, "NP11DNAGenus_taxonomy.txt", sep="\t", quote=F)
+```
+
+#Step 6. Bubbleplots
+```{r}
+library("phyloseq"); packageVersion("phyloseq")
+library("ggplot2"); packageVersion("ggplot2")
+theme_set(theme_bw())
+```
+
+#load the right phyloseq object with metadata
+```{r}
+NP11 <- NP11
+```
+
+```{r}
+NP11ClassX <- tax_glom(NP11, "Genus")
+NPX <- tax_table(NP11ClassX)
+NPXX <- NPX[,6] #this number chooses the taxonomic level to get the list of names from. e.g. Genus is the 6th level of taxonomy
+NPXX = as.data.frame(NPXX)
+avector <- NPXX[,1]
+class(avector)
+avector
+```
+
+#Extact as dataframe
+```{r}
+# Extract abundance matrix from the phyloseq object
+OTU1 = as(otu_table(NP11ClassX), "matrix")
+# transpose if necessary
+if(taxa_are_rows(NP11ClassX)){OTU1 <- t(OTU1)}
+NP11CLASSCounts = as.data.frame(OTU1)
+# convert column names to taxonomy names 
+names(NP11CLASSCounts)<-paste0(avector)
+#convert to matrix
+NP11CLASSCounts <- data.matrix(NP11CLASSCounts, rownames.force = NA)
+NP11CLASSCounts
+```
+
+#change phyloseq to dataframe
+```{r}
+library(reshape2)
+frequencies_NP11CLASSCounts = melt(NP11CLASSCounts)
+names(frequencies_NP11CLASSCounts) = c('Site', 'Genus', 'Abundance') 
+```
+
+#keep anly things with or greater than 5% abundance
+```{r}
+frequencies_NP11CLASSCounts <- subset(frequencies_NP11CLASSCounts, Abundance >= 0.05, select=Site:Abundance)
+frequencies_NP11CLASSCounts
+```
+
+```{r}
+library(ggplot2)
+sp2 <- ggplot(frequencies_NP11CLASSCounts, 
+              aes(x = Site, 
+                  y = Genus, 
+                  size = Abundance, 
+                  na.rm = TRUE, 
+                  )) + geom_point()
+sp2+scale_color_gradient(low="#37e187", high="#b94fbe") + theme(axis.text.x = element_text(angle = 90)) + scale_x_discrete(limits=c("TD-B516", "RJ-NP1112", "RJ-NP11iii", "RJ-NP11ii", "RJ-NP1111", "RJ-NP1113"), labels=c("TD-B516" = "SB B", "RJ-NP1112" = "T0", "RJ-NP11iii" = "FC", "RJ-NP11ii" = "EChem B iii", "RJ-NP1111" = "EChem B i", "RJ-NP1113" = "OC")) 
+#col = colour. Remove this for paper figure
+#for scale_x, limits = order on axis. labels = rename axis groups. Has to be this order to work.
+```
+
+
+```{r}
+ggsave('NP11Bubble.pdf', width=11, height=3)
+ggsave('NP11Bubble.jpeg', width=11, height=3)
+```
+
+
